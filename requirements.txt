@@ -1,0 +1,9 @@
+# Everything needed to run the model (predict.py, evaluate.py, library use).
+#
+# Install PyTorch first, with a build matching your CUDA version, from
+# https://pytorch.org/get-started/locally/ — the default PyPI wheel may not be
+# the right CUDA variant for your driver. The bound below only records the
+# oldest version this code was tested with.
+torch>=2.1
+numpy>=1.24
+SimpleITK>=2.3

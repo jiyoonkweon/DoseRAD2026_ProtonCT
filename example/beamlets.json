@@ -1,0 +1,82 @@
+[
+  {
+    "image_file_idx": 0,
+    "iso_center": [
+      55.1852,
+      22.0268,
+      -4.6958
+    ],
+    "anatomical_region": "thorax",
+    "beams": [
+      {
+        "gantry_angle": 340.0,
+        "rays": [
+          {
+            "ray_source": [
+              -305.63,
+              -910.83,
+              -44.7
+            ],
+            "ray_target": [
+              34.506081654438105,
+              29.546225750505187,
+              -44.7
+            ],
+            "beamlets": [
+              {
+                "beamlet_uuid": "bd804a57-3c02-5d1f-8ef0-5d7277bfb69a",
+                "energy": 106.3045,
+                "output_info": {
+                  "output_file_idx": 0,
+                  "idx_in_output": 0,
+                  "minimum_cutoff": 0.0
+                }
+              },
+              {
+                "beamlet_uuid": "2974f4bd-45c9-5f86-9a37-88b3972dfc2c",
+                "energy": 90.5576,
+                "output_info": {
+                  "output_file_idx": 0,
+                  "idx_in_output": 1,
+                  "minimum_cutoff": 0.0
+                }
+              }
+            ]
+          },
+          {
+            "ray_source": [
+              -305.63,
+              -910.83,
+              -4.7
+            ],
+            "ray_target": [
+              34.506081654438105,
+              29.546225750505187,
+              -4.7
+            ],
+            "beamlets": [
+              {
+                "beamlet_uuid": "efd01c89-c648-50cb-a47b-a7e2baa845f9",
+                "energy": 97.5459,
+                "output_info": {
+                  "output_file_idx": 0,
+                  "idx_in_output": 2,
+                  "minimum_cutoff": 0.0
+                }
+              },
+              {
+                "beamlet_uuid": "ecd3f1bd-af04-5491-ac4f-877c57da73fc",
+                "energy": 95.2605,
+                "output_info": {
+                  "output_file_idx": 0,
+                  "idx_in_output": 3,
+                  "minimum_cutoff": 0.0
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]
