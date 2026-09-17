@@ -159,11 +159,71 @@ Note that repeated runs are usually but not always bit-identical, because cuDNN
 picks its convolution algorithm by measured speed. The variation is around
 10⁻⁴ of the beamlet maximum and does not move these metrics.
 
+## Runtime
+
+`benchmark.py` measures inference speed the way the challenge scores it. The
+leaderboard fits
+
+```
+T = t_fix + N_images * t_img + N_beamlets * t_dose
+```
+
+to the wall time of every job it runs, and reports `T` at one image and 500
+beamlets. The script measures the two terms that scale, on a single patient,
+without the container:
+
+```bash
+python benchmark.py --case /path/to/DoseRAD2026/proton/training/1THB016
+```
+
+```
+device            NVIDIA A100-PCIE-40GB
+case              1THB143  CT 590x518x146
+beamlets timed    184  (200 run, first 16 discarded), best of 2 passes
+
+  startup weights + warm-up              2.76 s   (/health; the platform times /invoke)
+  t_img   CT -> density, coordinates     1.03 s
+  t_dose  per beamlet                    26.6 ms
+
+  runtime for 1 image and 500 beamlets
+    t_img + 500 * t_dose = 14.3 s
+```
+
+Loading the weights and warming up cuDNN are reported but not added in: the
+container does both while answering `/health`, before the platform starts timing
+`/invoke`. What is timed per beamlet is the whole path the platform pays for —
+channel construction, the network, back-projection to the patient grid, the copy
+back to the host, the rescaling to absolute Gy, and the cutoff — everything
+except writing the result out.
+
+On one A100, three patients read `t_dose` between 22.7 and 26.6 ms and a runtime
+between 12.0 and 14.3 s, against the 17.2345 s the platform returned. The
+evaluation hardware is an A10G, which accounts for most of what is left.
+
+Two things move this number more than the model does.
+
+**Where the output goes.** The container writes a compressed 4-D MetaImage per
+output slot. Measured with that directory on a network filesystem, the write ran
+at 28.5 MiB/s, the queue backed up, and the reported cost per beamlet climbed
+from 34 to 98 ms over the slots of one job while prediction itself stayed flat at
+1.1 to 2.2 s per slot — `t_dose` came out 2.7x too high. On local storage the
+write drops to about 0.2 s per slot and the two agree again. `benchmark.py` does
+not write at all, so it is not exposed to this; a container-based measurement is,
+and its output directory should be kept off a network filesystem.
+
+**Which beamlets.** Two beamlets that share a ray reuse its resampling grids, so
+the second is cheaper than the first. Plans arrive in beam and ray order, so the
+platform gets that reuse. The script keeps every chosen ray whole and draws rays
+evenly across the plan, which preserves the reuse while still spanning the plan's
+gantry angles and energies; sampling individual beamlets breaks it and reads
+several percent slower per beamlet.
+
 ## Repository layout
 
 ```
 predict.py               command line: CT + beamlets -> dose
 evaluate.py              score predictions against the reference Monte Carlo dose
+benchmark.py             measure runtime the way the leaderboard computes it
 Dockerfile               submission image, as submitted
 protondose/
   geometry.py            beam's-eye-view box, beamlet frame, resampling
