@@ -7,6 +7,11 @@ Reports the two beam-level metrics the challenge scores, masked beam MAE and
 IDD curve distance, over beamlets taken from the case's own plan file. The
 organizers' implementation is authoritative:
 https://github.com/DoseRAD2026/evaluation-setup
+
+--runtime adds the other half of the challenge score, measured as the
+leaderboard computes it. It runs a second pass over the plan because timing
+wants a different sample of beamlets than scoring does; protondose/timing.py
+says why.
 """
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from protondose import inference
+from protondose import inference, timing
 from protondose.geometry import patient_phys_coords
 
 
@@ -107,6 +112,12 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=8,
                    help="beamlets to score, spread evenly through the plan (0 = all)")
     p.add_argument("--model-dir", default=str(Path(__file__).resolve().parent / "model"))
+    p.add_argument("--runtime", action="store_true",
+                   help="also measure inference runtime the way the leaderboard "
+                        "computes it, in a second pass over the plan")
+    p.add_argument("--runtime-beamlets", type=int, default=0,
+                   help="beamlets for that pass, as whole rays drawn evenly across "
+                        "the plan; 0, the default, runs the whole plan")
     p.add_argument("--csv", type=Path, help="write the per-beamlet table here")
     args = p.parse_args()
 
@@ -119,8 +130,11 @@ def main() -> None:
         picks = np.linspace(0, len(items) - 1, args.limit).round().astype(int)
         items = [items[i] for i in dict.fromkeys(picks.tolist())]
 
-    model = inference.build_model(Path(args.model_dir), device="cuda")
-    inference.warmup(model)
+    def _load():
+        m = inference.build_model(Path(args.model_dir), device="cuda")
+        inference.warmup(m)
+        return m
+    model, t_startup = timing._timed(_load)
 
     image = sitk.ReadImage(str(ct_file))
     spacing = image.GetSpacing()
@@ -155,6 +169,13 @@ def main() -> None:
     print(f"\n{len(rows)} beamlets of {args.case.name}")
     print(f"  masked beam MAE      {np.nanmean(mae):.4f} +/- {np.nanstd(mae):.4f}")
     print(f"  IDD curve distance   {np.nanmean(idd):.4f} +/- {np.nanstd(idd):.4f}")
+
+    if args.runtime:
+        rt = timing.measure_runtime(args.case, Path(args.model_dir),
+                                    n=args.runtime_beamlets, model=model,
+                                    t_startup=t_startup)
+        print()
+        print(rt.report())
 
     if args.csv:
         with open(args.csv, "w", newline="") as fh:
