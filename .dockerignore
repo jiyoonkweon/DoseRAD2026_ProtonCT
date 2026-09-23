@@ -1,8 +1,0 @@
-.git/
-__pycache__/
-*.pyc
-*.md
-LICENSE
-predict.py
-evaluate.py
-example/

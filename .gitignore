@@ -1,9 +1,8 @@
 __pycache__/
 *.pyc
-*.tar.gz
-.venv/
 .DS_Store
 
-# local run outputs
-dose/
-out/
+# Dataset, training cache and training outputs stay local
+/data/
+/cache/
+/runs/

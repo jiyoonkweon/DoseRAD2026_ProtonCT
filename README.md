@@ -1,18 +1,14 @@
 # DoseRAD2026 — Proton Dose on CT
 
 Beamlet-wise proton dose prediction from a patient CT, in place of Monte Carlo
-transport. This is the submission to
+transport. This is the model submitted to the
 [DoseRAD2026 Grand Challenge](https://doserad2026.grand-challenge.org/),
-**Task 3 (proton, CT)**, which placed **2nd overall**.
+**Task 3 (proton, CT)**, where it placed **2nd overall**.
 
-Each beamlet is predicted independently, so a full plan dose is a linear
-combination of beamlets under arbitrary monitor-unit weights — no retraining or
-re-inference during plan optimization. Inference is fast enough to matter: the
-challenge's runtime metric — the time for one CT and 500 beamlets — came out at
-17.2 s, the fastest of all submissions.
-
-The repository contains the submitted algorithm and its trained weights, with
-every value fixed to the one that was submitted.
+The repository contains the trained weights and everything needed to rebuild
+them: data preparation, the two-stage training, validation and prediction.
+Every setting is fixed to the submitted model, in
+[`protondose/config.py`](protondose/config.py); the scripts take paths only.
 
 ## Results
 
@@ -28,236 +24,211 @@ Final test leaderboard, per-metric position in parentheses:
 | Runtime | 17.2345 s | 1 |
 | **Mean position** | **3.00** | **2nd overall** |
 
-Runtime carries double weight, so the mean is over seven terms:
-(3 + 5 + 5 + 4 + 2 + 1 + 1) / 7.
+Runtime carries double weight, so the mean is over seven terms. The 11
+validation patients also served for model selection, so scores on them are not
+an unbiased estimate; `validate.py` reports them as a check of the installation.
 
 ## Method
 
-The CT is resampled into a canonical beam's-eye-view box aligned with the ray —
-361 × 33 × 33 voxels at 2 mm isotropic spacing — and five physics channels are
-built on it: mass density, spot fluence, radiological depth, normalized nominal
-energy, and an analytic Bragg-curve prior. A 3D residual U-Net with a
-depth-sequential ConvLSTM bottleneck (6,453,261 parameters) predicts the dose,
-which is then clamped, resampled back to the patient grid, rescaled to absolute
-Gy, and cut off below the plan's per-beamlet threshold. One model serves both
-anatomical sites; no ensembling and no test-time augmentation.
+**Input.** Each beamlet gets its own box aligned with its ray: 64 mm × 64 mm
+laterally, from 380 mm upstream to 340 mm downstream of the ray target, at 2 mm
+— 361 × 33 × 33 voxels. The CT is resampled into it and five channels are built
+on it:
+
+| | Channel | |
+| --- | --- | --- |
+| C1 | mass density | official HU-to-density table |
+| C2 | spot fluence | Gaussian of the energy's spot sigma; the beams are parallel, so the same at every depth |
+| C3 | water-equivalent depth | ∑ρ·dw along the beam, voxel-centred |
+| C4 | energy | E / 200.7966 MeV |
+| C5 | Bragg prior | analytic Bortfeld curve in water, looked up at C3 |
+
+**Network.** 3D residual U-Net, width 24, three levels with strides
+(2,2,2), (2,2,2), (2,1,1), squeeze-and-excitation in every block, and a
+unidirectional ConvLSTM that scans the 45 bottleneck slices from upstream to
+downstream. 6,453,261 parameters. The output is the dose on the box divided by
+a global constant (1.1187 × 10⁻³ Gy); inference clamps it at zero,
+back-projects it to the patient grid and multiplies the constant back.
+
+**Loss.** Computed on the patient grid, where the challenge scores, not on the
+box. For every beamlet, reference-dose voxels are grouped into three dose bands
+(≥10 %, 1–10 %, 0.1–1 % of the maximum), up to 48k / 24k / 16k of them are
+stored with their box coordinates, and each step draws 32k / 16k / 12k. The
+loss is a band-weighted MSE at those points (weights 1 / 0.25 / 0.15; the
+lowest band is compared as 2×2×2 block means), plus an MSE on the box that fades
+over 120 epochs, an anchor on voxels below 0.1 % of the maximum (weight 2.5),
+and an integrated-depth-dose term (weight ramped to 0.5). Details are in
+[`protondose/loss.py`](protondose/loss.py) and
+[`protondose/pools.py`](protondose/pools.py).
+
+**Training.** AdamW (weight decay 1e-4), cosine learning rate, gradient
+clipping 1.0, batch 32, fp32, EMA of the weights (0.9995), no augmentation.
+Every epoch is validated on 8 beamlets per validation patient, with the EMA
+weights, on the patient grid with the official metrics; the score is
+masked beam MAE + IDD distance.
+
+| | Stage 1 | Stage 2 (released) |
+| --- | --- | --- |
+| Start | random initialization | stage 1 `best.pt` |
+| Epochs / learning rate | 60 / 3e-4 | 16 / 5e-5 |
+| IDD term ramp starts at | epoch 10 | epoch 0 |
+| Early stopping | patience 10 | none |
+| Best epoch | 52 | **14** |
+| Validation score | 0.013150 | **0.012895** |
+| Time on one L40S 46 GB | ≈ 31 h | ≈ 8.3 h |
+
+Split: 64 training and 11 validation patients, stratified by site,
+[`splits/train_val.json`](splits/train_val.json). No external data and no
+pretrained weights were used.
 
 ## Installation
 
-Requires a CUDA device and about 4.2 GiB of
-GPU memory.
+Needs a CUDA GPU. Training at batch 32 in fp32 uses about 38 GB of GPU memory;
+inference fits in a few GB.
 
 ```bash
 git clone https://github.com/jiyoonkweon/DoseRAD2026_ProtonCT.git
 cd DoseRAD2026_ProtonCT
 
-# PyTorch first, with the build matching your CUDA version:
+# PyTorch first, with the build matching your CUDA driver:
 # https://pytorch.org/get-started/locally/
 pip install -r requirements.txt
 ```
 
-That installs PyTorch, NumPy and SimpleITK, which is everything the model needs.
-`requirements-container.txt` adds the three packages the submission container
-uses on top; Docker is not needed otherwise.
+The released model was trained with Python 3.11.15, PyTorch 2.13.0 (CUDA 13.0),
+NumPy 1.26.4 and SimpleITK 2.5.5 on an NVIDIA L40S (46 GB). The figures quoted
+in this README for memory, cache building, validation and runtime were measured
+on an NVIDIA A100-PCIE-40GB, which the code also runs on.
 
-Verified on Python 3.10.13 with PyTorch 2.1.0 (CUDA 12.1, cuDNN 8.9.2), NumPy
-1.26.0 and SimpleITK 2.5.6, and inside the submission image
-(`pytorch/pytorch:2.9.1-cuda12.6-cudnn9-runtime`), both on an NVIDIA
-A100-PCIE-40GB with driver 580.126.09. The two combinations produce the same
-output, so the code is not tied to one PyTorch release.
+## Data
+
+Download the DoseRAD2026 proton training set from
+[Zenodo](https://doi.org/10.5281/zenodo.19347848) and place it as
+
+```
+data/DoseRAD2026/proton/training/
+├── beam_parameters.json          energy table, HU-to-density table
+├── 1ABB006/
+│   ├── 1ABB006.json              plan: beams → rays → beamlets
+│   ├── image/ct.mha
+│   └── dose/Dose_B<beam>_R<ray>_L<beamlet>.mha
+└── ...                           75 patients, 1,080 beamlets each
+```
+
+Any other location works: pass it as `--data`. The MR images are not used.
 
 ## Usage
 
-### Command line
-
-Beamlets are read from a JSON file, never typed in: either a patient plan from
-the training set (`1THB016/1THB016.json`) or the challenge's beam-level
-metadata. Both carry the ray endpoints and the nominal energy, which is all a
-beamlet needs. `example/beamlets.json` holds four beamlets of patient 1THB016
-in the second schema. The CT is not redistributed here, so point `--ct` at your
-own copy of the dataset
-([Zenodo](https://doi.org/10.5281/zenodo.19347848)):
+### 1. Prepare the training cache
 
 ```bash
-python predict.py \
-    --ct /path/to/DoseRAD2026/proton/training/1THB016/image/ct.mha \
-    --beamlets example/beamlets.json \
-    --out dose/
+python prepare_data.py --data data/DoseRAD2026/proton/training --cache cache
 ```
 
-This writes one 3-D MetaImage per beamlet, in absolute Gy, on the patient grid,
-named `dose_000.mha`, `dose_001.mha`, ... in the order the beamlets appear in
-the file. Give it a whole plan file and it predicts every beamlet in that plan.
+Writes one file per beamlet to `cache/<patient>/`: the density and reference
+dose resampled onto the beamlet's box, and its supervision points. About 5
+minutes and 1.1 GB per patient on one A100 — 6 hours and 80 GB for all 75.
+For several GPUs, run one process per GPU with `--shard i --num-shards n`.
+Finished beamlets are skipped, so an interrupted run can be restarted.
 
-### As a library
-
-```python
-from pathlib import Path
-import SimpleITK as sitk
-from protondose import (Beamlet, NORM_SCALE, build_model, make_density,
-                        predict_beamlets, warmup)
-from protondose.geometry import patient_phys_coords
-
-model = build_model(Path("model"))
-warmup(model)                                   # cuDNN autotuning, done once
-
-ct = sitk.ReadImage("CT.mha")
-density = make_density(ct, model["hlut"], "cuda")
-phys = patient_phys_coords(ct, device="cuda")
-
-beamlet = Beamlet(ray_source, ray_target, energy_mev)
-for sub, bbox in predict_beamlets(model, [beamlet], ct, density, phys):
-    dose_gy = sub * NORM_SCALE
-```
-
-`predict_beamlets` yields the patient-grid sub-volume covered by the beam's-eye
-view, together with its bounding box `(x0, x1, y0, y1, z0, z1)`; everything
-outside is exactly zero. Pass several beamlets at once to batch them —
-beamlets that share a ray reuse the same resampling grids. `predict.py` shows
-how to expand a sub-volume to a full volume and write it out.
-
-### The submission container
-
-`Dockerfile` builds the image that was submitted, in case you want to reproduce
-the leaderboard runtime or re-submit. It wraps the same computation in the
-challenge's `/health` and `/invoke` API and writes the 4-D stacked MetaImage the
-platform expects, one file per output slot. Running the model does not require
-it.
-
-## Evaluation
-
-`evaluate.py` scores predictions against the reference Monte Carlo dose that
-ships with the training set, using the challenge's two beam-level metrics:
-masked beam MAE and IDD curve distance. Point it at a patient directory and it
-reads the beamlets from that patient's own plan file, predicts them, and
-compares each one against `dose/Dose_B<beam>_R<ray>_L<beamlet>.mha`:
+### 2. Train
 
 ```bash
-python evaluate.py --case /path/to/DoseRAD2026/proton/training/1THB016 --limit 8
+python train.py --stage 1 --data data/DoseRAD2026/proton/training --cache cache
+python train.py --stage 2 --data data/DoseRAD2026/proton/training --cache cache
 ```
 
+Stage 1 writes `runs/stage1/`, and stage 2 starts from `runs/stage1/best.pt`
+and writes `runs/stage2/`. Each directory gets `best.pt` (EMA weights of the
+best epoch, the file to use), `last.pt` (full state; continue with `--resume`)
+and `log.csv`. `--split splits/example.json` trains and validates on a single
+patient, to check the pipeline end to end.
+
+### 3. Validate
+
+```bash
+python validate.py --data data/DoseRAD2026/proton/training
 ```
-beamlet                     E (MeV)       MAE       IDD
-Dose_B0_R0_L0.mha            120.43    0.0076    0.0123
-Dose_B5_R2_L0.mha             83.13    0.0095    0.0045
-Dose_B10_R4_L0.mha            60.13    0.0085    0.0048
+
+Runs the full CT-to-dose inference on 40 beamlets per validation patient,
+spread over the energy range, and reports masked beam MAE and IDD curve
+distance against the reference dose. `--weights runs/stage2/best.pt` scores
+your own training; `--per-patient 0` takes every beamlet; `--csv FILE` writes
+the per-beamlet table. With the released weights it prints
+
+```
+1ABB030  n=  40  masked MAE 0.00608  IDD 0.00495
+1ABB031  n=  40  masked MAE 0.00786  IDD 0.00850
 ...
-8 beamlets of 1THB016
-  masked beam MAE      0.0083 +/- 0.0011
-  IDD curve distance   0.0061 +/- 0.0024
+1THB143  n=  40  masked MAE 0.00851  IDD 0.00627
+
+440 beamlets, 11 patients
+  masked beam MAE      0.00720 +/- 0.00289
+  IDD curve distance   0.00579 +/- 0.00336
 ```
 
-`--limit` takes that many beamlets spread evenly through the plan, so a quick
-check covers a range of energies and gantry angles; `--limit 0` scores all of
-them, which for the example case means 1,080 beamlets and as many reference
-volumes to read. `--csv FILE` writes the per-beamlet table. Both metrics are
-reimplemented here to give identical results to the organizers' evaluator; that
-one, which also covers the plan-level metrics, is at
-[DoseRAD2026/evaluation-setup](https://github.com/DoseRAD2026/evaluation-setup).
+up to cuDNN algorithm choice, which moves the last digit. These numbers check
+that the installation reproduces the released model; the performance of the
+method is the leaderboard result above.
 
-Note that repeated runs are usually but not always bit-identical, because cuDNN
-picks its convolution algorithm by measured speed. The variation is around
-10⁻⁴ of the beamlet maximum and does not move these metrics.
-
-## Runtime
-
-Runtime is half the challenge score, and it carries double the weight of any
-single accuracy metric. `evaluate.py --runtime` reports it next to the accuracy
-metrics, so one command covers the whole scorecard:
+### 4. Predict
 
 ```bash
-python evaluate.py --case /path/to/DoseRAD2026/proton/training/1THB016 --runtime
+python predict.py --data data/DoseRAD2026/proton/training --patient 1THB063 --out pred/
 ```
 
-```
-4 beamlets of 1THB143
-  masked beam MAE      0.0077 +/- 0.0022
-  IDD curve distance   0.0063 +/- 0.0028
+Writes the dose of every beamlet in the patient's plan to
+`pred/Dose_B<beam>_R<ray>_L<beamlet>.mha`, in Gy on the CT grid. `--limit N`
+predicts only N beamlets spread over the plan.
 
-runtime (1064 beamlets, whole rays across the plan)
-  startup weights + warm-up              3.06 s   (/health; the platform times /invoke)
-  t_img   CT -> density, coordinates     1.02 s
-  t_dose  per beamlet                    29.0 ms
-  1 image + 500 beamlets  =  15.5 s
-```
-
-The leaderboard fits `T = t_fix + N_images * t_img + N_beamlets * t_dose` to the
-wall time of every job it runs and reports `T` at one image and 500 beamlets.
-The two terms that scale are measured here, over the patient's whole plan:
-`t_dose` is a marginal cost, since that fit puts one-off costs in `t_fix`, so it
-is read over as many beamlets as there are. Loading the weights and warming up cuDNN are
-reported but not added in: the container does both while answering `/health`,
-before the platform starts timing `/invoke`. What is timed per beamlet is the
-rest of the path the platform pays for — channel construction, the network,
-back-projection to the patient grid, the copy back to the host, the rescaling to
-absolute Gy, and the cutoff.
-
-`benchmark.py` runs the same measurement alone, for a machine that holds a CT
-and a plan but not the reference dose volumes:
-
-```bash
-python benchmark.py --case /path/to/DoseRAD2026/proton/training/1THB016
-```
-
-On one A100 this reads 15.5 s against the 17.2345 s the platform returned; the
-evaluation hardware is an A10G, which accounts for most of the difference. Three
-things move the number more than the model does, and `protondose/timing.py`
-explains each:
-
-- **Where the output goes.** The container writes a compressed 4-D MetaImage per
-  output slot. Measured with that directory on a network filesystem, the write
-  ran at 28.5 MiB/s, the queue backed up, and the cost per beamlet climbed from
-  34 to 98 ms over the slots of one job while prediction itself stayed flat —
-  `t_dose` came out 2.7x too high. Keep it on local storage.
-- **How many beamlets.** Resampling grids and host buffers are sized per ray, so
-  a short pass spreads those first allocations over too few beamlets: the same
-  patient reads 33.8 ms at 200, 29.3 ms at 500 and 29.1 ms across all 1,080. The
-  estimate converges well before a plan runs out, which is why the whole plan is
-  the default.
-- **Which beamlets.** Two beamlets sharing a ray reuse its grids, which is what
-  the platform gets from a plan in beam and ray order. Whole rays are kept
-  together and drawn evenly across the plan, so the sample spans its gantry
-  angles and energies without breaking that reuse.
+The output is the raw prediction, clamped at zero. The challenge additionally
+zeroes every voxel below the per-beamlet `minimum_cutoff` given in its test
+metadata; the training plans carry no such field, so `predict.py` leaves that
+step to the caller.
 
 ## Repository layout
 
 ```
-predict.py               command line: CT + beamlets -> dose
-evaluate.py              score predictions, and with --runtime time them too
-benchmark.py             the same runtime measurement, without scoring
-Dockerfile               submission image, as submitted
+prepare_data.py          dataset -> training cache
+train.py                 two-stage training, per-epoch validation
+validate.py              official beam-level metrics on the validation patients
+predict.py               patient plan -> dose .mha per beamlet
 protondose/
-  geometry.py            beam's-eye-view box, beamlet frame, resampling
-  channels.py            input channels C1-C4, and the HU-to-density table
-  bragg.py               input channel C5, the analytic Bragg-curve prior
-  network.py             the Dose3DNet architecture
-  inference.py           weight loading, warm-up, batched beamlet prediction
-  timing.py              runtime, measured as the leaderboard computes it
-  challenge_io.py        challenge metadata in, 4-D compressed MetaImage out
-  server.py              /health and /invoke endpoints; the container entry point
-model/
-  model.pt               trained weights
-  beam_parameters.json   energy table and HU-to-density calibration
-example/
-  beamlets.json          four beamlets, in the challenge metadata schema
+  config.py              every fixed setting of the released model
+  data.py                dataset layout, plan reading, beamlet selection
+  geometry.py            beamlet frame, BEV box, resampling both ways
+  channels.py            input channels C1-C4 and the channel builder
+  bragg.py               input channel C5, the Bragg-curve prior
+  network.py             Dose3DNet
+  pools.py               patient-space supervision points
+  loss.py                training loss
+  dataset.py             cache files -> training batches
+  metrics.py             masked beam MAE and IDD distance
+  inference.py           CT + beamlets -> dose on the patient grid
+splits/
+  train_val.json         64 training / 11 validation patients
+  example.json           one patient, for a pipeline check
+weights/
+  model.pt               released weights (stage 2, epoch 14)
 ```
 
-`inference.py` is the method. `challenge_io.py` and `server.py` are the
-packaging the challenge required, and nothing in `inference.py` depends on them.
+## Reproducibility
 
-## Training
+cuDNN picks convolution algorithms by measured speed, so repeated runs can
+differ slightly. Scoring the released weights with `train.py`'s per-epoch
+validation gives 0.0128935, against 0.0128949 logged when the checkpoint was
+saved; the difference is in the sixth decimal. The draw of supervision points
+in `prepare_data.py` and during training is random and not seeded.
 
-The weights were trained from scratch on
-the DoseRAD2026 training split — no external data, no pretrained weights — in
-two stages totalling about 38 GPU-hours on one NVIDIA A100-PCIE-40GB. The loss
-is evaluated on the patient grid, where scoring happens, rather than on the
-network's own grid.
+The metrics follow the organizers' evaluator,
+[DoseRAD2026/evaluation-setup](https://github.com/DoseRAD2026/evaluation-setup),
+which also covers the plan-level metrics.
 
-## Data
+## Data license
 
-The model was trained on the DoseRAD2026 public training set, CC BY-NC 4.0, DOI
-[10.5281/zenodo.19347848](https://doi.org/10.5281/zenodo.19347848). None of it is
-redistributed here. Thanks to the organizers for providing it.
+The model was trained on the DoseRAD2026 public training set, CC BY-NC 4.0,
+DOI [10.5281/zenodo.19347848](https://doi.org/10.5281/zenodo.19347848). None
+of it is redistributed here. Thanks to the organizers for providing it.
 
 ## Citation
 

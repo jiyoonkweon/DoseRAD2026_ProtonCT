@@ -1,6 +1,0 @@
-# Extra packages for the submission container (protondose/server.py and
-# protondose/challenge_io.py). Not needed to run the model.
--r requirements.txt
-fastapi
-uvicorn
-isal            # SIMD deflate; falls back to stdlib zlib if unavailable
