@@ -169,7 +169,10 @@ the per-beamlet table. With the released weights it prints
 
 up to cuDNN algorithm choice, which moves the last digit. These numbers check
 that the installation reproduces the released model; the performance of the
-method is the leaderboard result above.
+method is the leaderboard result above. `validate.py` zeroes prediction and
+reference below the training cutoff, 0.088 % of the reference maximum. The
+manuscript scores the same 440 beamlets with a fixed cutoff of 1e-6 Gy instead,
+which leaves the MAE unchanged and gives an IDD distance of 0.0056.
 
 ### 4. Predict
 
